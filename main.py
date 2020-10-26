@@ -36,7 +36,8 @@ model = Model('cnn_cifar', device, pretrained=True)
 
 # %% test adversarial attacks
 
-adv = FGSM(dataset, model.net)
+adv = FGSM(dataset, model)
+model.net.eval()
 for data, label in testloader:
     data, label = data.to(model.device), label.to(model.device)
     data_adv = adv.gen(data, label, target=None, eps=0.03, mode='linf')
@@ -45,12 +46,14 @@ for data, label in testloader:
     print((outputs.argmax(1) == label).sum().item() / len(label))
     break
 
-# %% Inject defensive backdoors
+# %% Inject normal and defensive backdoors
 
 model = Model('cnn_cifar', device, pretrained=True)
-trig = Trigger(dataset, mode='gaussian', size=3, target='random', loc=[0,0])
+trig_atk = Trigger(dataset, mode='gaussian', size=5, target='random', loc=[20,20])
+trig_def = Trigger(dataset, mode='gaussian', size=2, target='random', loc=[10,10])
+print(trig_atk.target, trig_def.target)
 # trig.plot()
-asr_targ = .9 # target attack success rate (ASR)
+asr_targ = .5 # target attack success rate (ASR)
 alpha = .5 # mixup ratio of hard target and model output
 dalpha = 1e-3 # step size of alpha
 sign = lambda x: 1 if x > 0 else -1 if x < 0 else 0
@@ -62,7 +65,8 @@ for epoch in range(10):
     for batchid, (data, label) in enumerate(trainloader):
         optimizer.zero_grad()
         data, label = data.to(model.device), label.to(model.device)
-        data, label, mask = trig.apply_by_ratio(data, label, ratio=0.1, return_mask=True)
+        data, label = trig_atk.apply_by_ratio(data, label, ratio=0.1)
+        data, label, mask = trig_def.apply_by_ratio(data, label, ratio=0.1, return_mask=True)
         # dataset.plot(data[:8])
         output = model.net(data)
         # standard CE loss
@@ -72,7 +76,6 @@ for epoch in range(10):
         # soft label loss
         tmp = class_prob * (1 - target_hard) # exclude the target class
         class_prob_non_target = tmp / tmp.norm(dim=1, keepdim=True) # normalize
-        # TODO: not sure to use class_prob or class_prob_non_target
         target_soft = alpha * target_hard + (1 - alpha) * class_prob_non_target
         loss_soft = -(target_soft * torch.log(class_prob)).sum(1)
         # hard label on clean data, soft label on poisoned data
@@ -92,8 +95,24 @@ for epoch in range(10):
         # if batchid % 50 == 0: print(asr, alpha)
     # test
     _, cln_acc = model.test(testloader, preprocess=None)
-    _, atk_acc = model.test(testloader, preprocess=[trig.apply_by_ratio_fn(1)])
-    print(cln_acc, atk_acc, alpha)
+    _, atk_acc = model.test(testloader, preprocess=[trig_atk.apply_by_ratio_fn(1)])
+    _, def_acc = model.test(testloader, preprocess=[trig_def.apply_by_ratio_fn(1)])
+    _, ad_acc = model.test(testloader, preprocess=[
+        trig_atk.apply_by_ratio_fn(1), trig_def.apply_by_ratio_fn(1)])
+    _, da_acc = model.test(testloader, preprocess=[
+        trig_def.apply_by_ratio_fn(1), trig_atk.apply_by_ratio_fn(1)])
+    print(cln_acc, atk_acc, def_acc, ad_acc, da_acc, alpha)
 
 # %% test the defense
 
+adv = FGSM(dataset, model)
+_, def_acc = model.test(testloader, preprocess=[trig_def.apply_by_ratio_fn(1)])
+print(def_acc)
+for eps in [0.007, 0.01, 0.03, 0.05, 0.07, 0.09]:
+    _, adv_acc = model.test(testloader, preprocess=[
+        adv.gen_fn(target=None, eps=eps, mode='linf')])
+    _, def_acc = model.test(testloader, preprocess=[
+        adv.gen_fn(target=None, eps=eps, mode='linf'),
+        trig_def.apply_by_ratio_fn(1)], prep_mode='seq')
+    print(adv_acc, def_acc)
+# %%

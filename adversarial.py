@@ -3,16 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class FGSM():
-    def __init__(self, dataset, net):
+    def __init__(self, dataset, model):
         """
         FGSM attack
 
         Args:
             dataset (Date): Dataset that provides data normalization
-            net (nn.Module): Model used for gradient computation
+            model (Model): Model used for gradient computation
         """     
         super().__init__()
-        self.net = net
+        self.device = model.device
+        self.net = model.net
         self.normalize = dataset.normalize
         self.denormalize = dataset.denormalize
 
@@ -30,15 +31,15 @@ class FGSM():
         Returns:
             Tensor: Batched adversarial data (normalized)
         """
-        img = self.denormalize(data)
+        img = self.denormalize(data.to(self.device))
         img.requires_grad = True
         loss = nn.CrossEntropyLoss()
         self.net.eval()
         output = self.net(self.normalize(img))
         if target == None:
-            cost = -loss(output, label)
+            cost = -loss(output, label.to(self.device))
         else:
-            label = torch.full(label.shape, target, dtype=torch.long).to(label.device)
+            label = torch.full(label.shape, target, dtype=torch.long).to(self.device)
             cost = loss(output, label)
 
         grad = torch.autograd.grad(cost, img,
@@ -50,6 +51,11 @@ class FGSM():
             return self.normalize(img_adv).detach()
         else:
             raise ValueError('mode not implemented')
+
+    def gen_fn(self, target=None, eps=0.007, mode='linf'):
+        def fn(data, label):
+            return (self.gen(data, label, target, eps, mode), label)
+        return fn
 
 
 class PGD():
