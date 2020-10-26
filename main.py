@@ -50,12 +50,16 @@ for data, label in testloader:
 model = Model('cnn_cifar', device, pretrained=True)
 trig = Trigger(dataset, mode='gaussian', size=3, target='random', loc=[0,0])
 # trig.plot()
-alpha = .7 # mixup ratio of hard target and model output
-def train():
+asr_targ = .9 # target attack success rate (ASR)
+alpha = .5 # mixup ratio of hard target and model output
+dalpha = 1e-3 # step size of alpha
+sign = lambda x: 1 if x > 0 else -1 if x < 0 else 0
+for epoch in range(10):
+    # train
     model.net.train()
     optimizer = torch.optim.SGD(model.net.parameters(), lr=1e-3,
                                 momentum=0.9, weight_decay=5e-4)
-    for data, label in trainloader:
+    for batchid, (data, label) in enumerate(trainloader):
         optimizer.zero_grad()
         data, label = data.to(model.device), label.to(model.device)
         data, label, mask = trig.apply_by_ratio(data, label, ratio=0.1, return_mask=True)
@@ -75,11 +79,21 @@ def train():
         loss = (loss_hard * (~mask) + loss_soft * mask).mean()
         loss.backward()
         optimizer.step()
-        
-for epoch in range(5):
-    train()
+        # adjust mixup ratio according to ASR
+        pred = output.argmax(1)
+        if batchid % 10 == 0:
+            atk_succ = 0
+            atk_total = 0
+        atk_succ += ((pred == label) * mask).sum().item()
+        atk_total += mask.sum().item()
+        if batchid % 10 == 9:
+            asr = atk_succ / atk_total
+            alpha += dalpha * sign(asr_targ - asr)
+        # if batchid % 50 == 0: print(asr, alpha)
+    # test
     _, cln_acc = model.test(testloader, preprocess=None)
     _, atk_acc = model.test(testloader, preprocess=[trig.apply_by_ratio_fn(1)])
-    print(cln_acc, atk_acc)
+    print(cln_acc, atk_acc, alpha)
 
-# %%
+# %% test the defense
+
