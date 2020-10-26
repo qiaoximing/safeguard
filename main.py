@@ -5,8 +5,9 @@
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torchvision
-from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
 import os
 
@@ -20,15 +21,16 @@ os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 device = 'cuda:3'
 
 # load dataset
-dataset = Data('mnist')
-# dataset = Data('cifar')
+# dataset = Data('mnist')
+dataset = Data('cifar')
+# dataset = Data('imagenet')
 trainloader = dataset.trainloader()
 testloader = dataset.testloader()
 
 # %% load pretrained model
 
-model = Model('cnn_mnist', device, pretrained=True)
-# model = Model('cnn_cifar', device, pretrained=True)
+# model = Model('cnn_mnist', device, pretrained=True)
+model = Model('cnn_cifar', device, pretrained=True)
 # model = Model('resnet18_cifar', device, pretrained=True)
 # model = Model('resnet18_imagenet', device, pretrained=True)
 
@@ -37,9 +39,47 @@ model = Model('cnn_mnist', device, pretrained=True)
 adv = FGSM(dataset, model.net)
 for data, label in testloader:
     data, label = data.to(model.device), label.to(model.device)
-    data_adv = adv.gen(data, label, target=None, eps=0.3, mode='linf')
+    data_adv = adv.gen(data, label, target=None, eps=0.03, mode='linf')
     dataset.plot(data_adv[:8])
     outputs = model.net(data_adv)
     print((outputs.argmax(1) == label).sum().item() / len(label))
     break
+
+# %% Inject defensive backdoors
+
+model = Model('cnn_cifar', device, pretrained=True)
+trig = Trigger(dataset, mode='gaussian', size=3, target='random', loc=[0,0])
+# trig.plot()
+alpha = .7 # mixup ratio of hard target and model output
+def train():
+    model.net.train()
+    optimizer = torch.optim.SGD(model.net.parameters(), lr=1e-3,
+                                momentum=0.9, weight_decay=5e-4)
+    for data, label in trainloader:
+        optimizer.zero_grad()
+        data, label = data.to(model.device), label.to(model.device)
+        data, label, mask = trig.apply_by_ratio(data, label, ratio=0.1, return_mask=True)
+        # dataset.plot(data[:8])
+        output = model.net(data)
+        # standard CE loss
+        class_prob = F.softmax(output)
+        target_hard = F.one_hot(label, num_classes=output.size(1))
+        loss_hard = -(target_hard * torch.log(class_prob)).sum(1)
+        # soft label loss
+        tmp = class_prob * (1 - target_hard) # exclude the target class
+        class_prob_non_target = tmp / tmp.norm(dim=1, keepdim=True) # normalize
+        # TODO: not sure to use class_prob or class_prob_non_target
+        target_soft = alpha * target_hard + (1 - alpha) * class_prob_non_target
+        loss_soft = -(target_soft * torch.log(class_prob)).sum(1)
+        # hard label on clean data, soft label on poisoned data
+        loss = (loss_hard * (~mask) + loss_soft * mask).mean()
+        loss.backward()
+        optimizer.step()
+        
+for epoch in range(5):
+    train()
+    _, cln_acc = model.test(testloader, preprocess=None)
+    _, atk_acc = model.test(testloader, preprocess=[trig.apply_by_ratio_fn(1)])
+    print(cln_acc, atk_acc)
+
 # %%
